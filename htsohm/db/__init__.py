@@ -28,7 +28,7 @@ def get_sqlite_dbcs(database_path=None):
         database_path = dbs[0]
     return "sqlite:///%s" % database_path
 
-def init_database(connection_string, backup=False):
+def init_database(connection_string, data_config, backup=False):
     global __engine__
     global __session__
 
@@ -43,6 +43,7 @@ def init_database(connection_string, backup=False):
     __session__ = sessionmaker(bind=__engine__)()
 
     # Create tables in the engine, if they don't exist already.
+    Material.add_data_columns(data_config)
     Base.metadata.create_all(__engine__)
     Base.metadata.bind = __engine__
 
@@ -52,17 +53,10 @@ def init_database(connection_string, backup=False):
 from htsohm.db.base import Base
 from htsohm.db.atom_sites import AtomSite
 from htsohm.db.atom_types import AtomTypes
-from htsohm.db.gas_loading import GasLoading
-from htsohm.db.surface_area import SurfaceArea
-from htsohm.db.void_fraction import VoidFraction
 from htsohm.db.material import Material
-from htsohm.db.structure import Structure
+
 
 def delete_extra_materials(delete_after_id):
     __engine__.execute("delete from materials where id > %d" % delete_after_id)
-    __engine__.execute("delete from gas_loadings where material_id > %d" % delete_after_id)
-    __engine__.execute("delete from surface_areas where material_id > %d" % delete_after_id)
-    __engine__.execute("delete from void_fractions where material_id > %d" % delete_after_id)
-    __engine__.execute("delete from structures where material_id > %d" % delete_after_id)
-    __engine__.execute("delete from atom_types where structure_id > %d" % delete_after_id)
-    __engine__.execute("delete from atom_sites where structure_id > %d" % delete_after_id)
+    __engine__.execute("delete from atom_types where material_id > %d" % delete_after_id)
+    __engine__.execute("delete from atom_sites where material_id > %d" % delete_after_id)

@@ -1,6 +1,5 @@
-#!/usr/bin/env python
+from setuptools import setup
 
-from distutils.core import setup
 setup(
     name = 'HTSOHM',
     version = '0.6.0',
@@ -10,13 +9,20 @@ setup(
     url = 'https://github.com/paulboone/htsohm',
     packages = ['htsohm'],
     install_requires=[
-        'numpy',
-        'scipy',
-        'sqlalchemy',
-        'click',
-        'pandas',
-        'pyyaml',
-        'matplotlib',
+        'numpy ~= 1.17',
+        'scipy ~= 1.3',
+        'sqlalchemy >= 1',
+        'click >= 6',
+        'pandas ~=0.25',
+        'pyyaml >= 3',
+    ],
+    extras_require={
+        'plots': [
+            'matplotlib ~= 3.1',
+        ],
+    },
+    tests_requires=[
+        "pytest ~= 6.0"
     ],
     entry_points={
           'console_scripts': [
@@ -32,9 +38,6 @@ setup(
               'psm-material-csv = htsohm.bin.output_csv:output_material_csv',
               'psm-csv-add-bin = htsohm.bin.output_csv:csv_add_bin',
               'psm-dof-analysis = htsohm.bin.dof_analysis:dof_analysis',
-              'psm-setup-one-atom-sweep = htsohm.bin.one_atom_sweep_setup:sweep_setup',
-              'psm-setup-cube-pore-sweep = htsohm.bin.cube_pore_sweep_setup:sweep_setup',
-              'psm-run-one-atom-sweep = htsohm.bin.one_atom_sweep_run:run_materials',
           ]
       },
 )

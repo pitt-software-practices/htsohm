@@ -7,26 +7,15 @@ import subprocess
 import shutil
 from string import Template
 import sys
-from uuid import uuid4
 
 import numpy as np
 
 from htsohm.simulation.raspa import write_mol_file, write_mixing_rules
 from htsohm.simulation.raspa import write_pseudo_atoms, write_force_field
 from htsohm.simulation.templates import load_and_subs_template
-from htsohm.db import GasLoading
 from htsohm.slog import slog
 
 def write_raspa_file(filename, material, simulation_config, restart):
-    """Writes RASPA input file for simulating gas adsorption.
-
-    Args:
-        filename (str): path to input file.
-        material (Material): material record.
-
-    Writes RASPA input-file.
-
-    """
     # Set default void fraction value if non was calculated
     if len(material.void_fraction) == 0 or material.void_fraction[0].void_fraction is None:
         void_fraction = 0.
@@ -34,13 +23,13 @@ def write_raspa_file(filename, material, simulation_config, restart):
         void_fraction = material.void_fraction[0].void_fraction
 
     # Load simulation parameters from config
-    unit_cells = material.structure.minimum_unit_cells(simulation_config['cutoff'])
+    unit_cells = material.minimum_unit_cells(simulation_config['cutoff'])
     values = {
             "Restart"                       : 'yes' if restart else 'no',
             "Cutoff"                        : simulation_config['cutoff'],
             "NumberOfCycles"                : simulation_config["simulation_cycles"],
             "NumberOfInitializationCycles"  : simulation_config["initialization_cycles"] if not restart else 0,
-            "FrameworkName"                 : material.uuid,
+            "FrameworkName"                 : material.id_or_uuid,
             "HeliumVoidFraction"            : void_fraction,
             "ExternalTemperature"           : simulation_config["temperature"],
             "ExternalPressure"              : simulation_config["pressure"],
@@ -54,7 +43,7 @@ def write_raspa_file(filename, material, simulation_config, restart):
     with open(filename, "w") as raspa_input_file:
         raspa_input_file.write(input_data)
 
-def write_output_files(material, simulation_config, output_dir, restart=False, filename=None):
+def write_input_files(material, simulation_config, output_dir, restart=False, filename=None):
     # Write simulation input-files
     # RASPA input-file
     if filename is None:
@@ -63,25 +52,13 @@ def write_output_files(material, simulation_config, output_dir, restart=False, f
     # Pseudomaterial mol-file
     write_mol_file(material, output_dir)
     # Lennard-Jones parameters, force_field_mixing_rules.def
-    write_mixing_rules(material.structure, output_dir)
+    write_mixing_rules(material, output_dir)
     # Pseudoatom definitions, pseudo_atoms.def (placeholder values)
-    write_pseudo_atoms(material.structure, output_dir)
+    write_pseudo_atoms(material, output_dir)
     # Overwritten interactions, force_field.def (none overwritten by default)
     write_force_field(output_dir)
 
 def parse_output(output_file, material, simulation_config):
-    """Parse output file for gas adsorption data.
-
-    Args:
-        output_file (str): path to simulation output file.
-
-    Returns:
-        results (dict): absolute and excess molar, gravimetric, and volumetric
-            gas loadings, as well as energy of average, van der Waals, and
-            Coulombic host-host, host-adsorbate, and adsorbate-adsorbate
-            interactions.
-
-    """
     gas_loading = GasLoading()
     gas_loading.adsorbate        = simulation_config["adsorbate"]
     gas_loading.pressure         = simulation_config["pressure"]
@@ -115,36 +92,32 @@ def pressure_string(p):
         return str(p)
 
 def run(material, simulation_config, config):
-    """Runs gas loading simulation.
-
-    Args:
-        material_id (Material): material record.
-
-    Returns:
-        results (dict): gas loading simulation results.
-
-    """
+    raise "need updating to new database format"
     adsorbate = simulation_config["adsorbate"]
-    output_dir = "output_{}_{}".format(material.uuid, uuid4())
+    output_dir = "output_{}_{}".format(material.id_or_uuid, simulation_config['name'])
     os.makedirs(output_dir, exist_ok=True)
     raspa_config = "./{}_loading.input".format(adsorbate)
     raspa_restart_config = "./{}_loading_restart.input".format(adsorbate)
 
     # RASPA input-files
-    write_output_files(material, simulation_config, output_dir, restart=False, filename=os.path.join(output_dir, raspa_config))
-    write_output_files(material, simulation_config, output_dir, restart=True, filename=os.path.join(output_dir, raspa_restart_config))
+    write_input_files(material, simulation_config, output_dir, restart=False, filename=os.path.join(output_dir, raspa_config))
+    write_input_files(material, simulation_config, output_dir, restart=True, filename=os.path.join(output_dir, raspa_restart_config))
 
     # Run simulations
     slog("Adsorbate        : {}".format(adsorbate))
     slog("Pressure         : {}".format(simulation_config["pressure"]))
     slog("Temperature      : {}".format(simulation_config["temperature"]))
 
-    unit_cells = material.structure.minimum_unit_cells(simulation_config['cutoff'])
+    unit_cells = material.minimum_unit_cells(simulation_config['cutoff'])
     total_unit_cells = unit_cells[0] * unit_cells[1] * unit_cells[2]
     all_atom_blocks = []
 
-    process = subprocess.run(["simulate", "-i", raspa_config], check=True, cwd=output_dir, capture_output=True, text=True)
-    slog(process.stdout)
+    process = subprocess.run(["simulate", "-i", raspa_config], cwd=output_dir, capture_output=True, text=True)
+    if process.returncode != 0:
+        slog(process.stdout)
+        slog(process.stderr)
+        process.check_returncode()
+
     for i in range(simulation_config['max_restarts'] + 1):
 
         data_files = glob(os.path.join(output_dir, "Output", "System_0", "*.data"))
@@ -205,8 +178,11 @@ def run(material, simulation_config, config):
         else:
             slog("\n--")
             slog("restart # %d" % i)
-            process = subprocess.run(["simulate", "-i", raspa_restart_config], check=True, cwd=output_dir, capture_output=True, text=True)
-            slog(process.stdout)
+            process = subprocess.run(["simulate", "-i", raspa_restart_config], cwd=output_dir, capture_output=True, text=True)
+            if process.returncode != 0:
+                slog(process.stdout)
+                slog(process.stderr)
+                process.check_returncode()
 
 
 

@@ -8,9 +8,11 @@ def default_configuration():
         'keep_configs': False,
         'output_dir': os.getcwd(),
         'void_fraction_subtype': 'raspa',
-        'load_restart_path': False,
         'num_processes': 1,
-        'initial_points_random_seed': int(time.time())
+        'initial_points_random_seed': int(time.time()),
+        'structure_parameters': {
+            'minimum_site_distance': 0.0
+        }
     }
 
 def load_config_file(path):
@@ -24,7 +26,7 @@ def load_config_file(path):
     """
     config = default_configuration()
     with open(path) as config_file:
-         config.update(yaml.load(config_file))
+         config.update(yaml.safe_load(config_file))
 
     enforce_config_ok(config)
 
@@ -34,3 +36,6 @@ def enforce_config_ok(config):
     assert config['void_fraction_subtype'] in ["raspa", "geo", "zeo"]
     assert config['selector_type'] in ["simplices-or-hull", "density-bin", "neighbor-bin",
                                         "best", "specific", "random"]
+    assert config['structure_parameters']['lattice_cubic'] == True
+    valid_perturbations = {"num_atoms", "atom_type_assignments", "atom_types", "lattice", "atom_sites", "charges"}
+    assert set(config['structure_parameters']['perturb']) <= valid_perturbations

@@ -7,7 +7,7 @@ import numpy as np
 from scipy.spatial import Delaunay
 
 
-def delaunay_figure(box_r, convergence_bins, output_path, triang=None, children=[], parents=[],
+def delaunay_figure(props, convergence_bins, output_path, triang=None, children=[], parents=[],
                     bins=[], new_bins=[], title="", patches=None, prop1range=(0.0,1.0),
                     prop2range=(0.0,1.0),perturbation_methods=None, show_grid=True,
                     show_triangulation=True, show_hull=True, bin_saturated=10, bin_scores=None,
@@ -20,29 +20,31 @@ def delaunay_figure(box_r, convergence_bins, output_path, triang=None, children=
     ax.set_xlim(prop1range[0], prop1range[1])
     ax.set_ylim(prop2range[0], prop2range[1])
     ax.set_xlabel("Void Fraction")
-    ax.set_ylabel("Methane Loading (V/V)")
+    ax.set_ylabel("Henry's Coefficient [mol / (m3 pa)]")
 
-    ax.set_xticks(prop1range[1] * np.array([0.0, 0.25, 0.5, 0.75, 1.0]))
-    ax.set_yticks(prop2range[1] * np.array([0.0, 0.25, 0.5, 0.75, 1.0]))
-    ax.set_xticks(prop1range[1] * np.array(range(0,convergence_bins + 1))/convergence_bins, minor=True)
-    ax.set_yticks(prop2range[1] * np.array(range(0,convergence_bins + 1))/convergence_bins, minor=True)
+    ax.set_xticks((prop1range[1] - prop1range[0]) * np.array([0.0, 0.25, 0.5, 0.75, 1.0]) + prop1range[0])
+    ax.set_yticks((prop2range[1] - prop2range[0]) * np.array([0.0, 0.25, 0.5, 0.75, 1.0]) + prop2range[0])
+    ax.set_xticks((prop1range[1] - prop1range[0]) * np.array(range(0,convergence_bins + 1))/convergence_bins + prop1range[0], minor=True)
+    ax.set_yticks((prop2range[1] - prop2range[0]) * np.array(range(0,convergence_bins + 1))/convergence_bins + prop2range[0], minor=True)
 
     if show_grid:
         ax.grid(linestyle='-', color='0.8', zorder=0)
 
-    dbinx = prop1range[1] / convergence_bins
-    dbiny = prop2range[1] / convergence_bins
+    dbinx = (prop1range[1] - prop1range[0]) / convergence_bins
+    dbiny = (prop2range[1] - prop2range[0]) / convergence_bins
 
     total_materials = bins.sum()
     bin_rects = []
     for b, bcount in np.ndenumerate(bins):
         if bcount > 0.0:
-            bin_rects.append(Rectangle((b[0] * dbinx, b[1] * dbiny), dbinx, dbiny, \
+            bin_rects.append(Rectangle((b[0] * dbinx + prop1range[0],
+                        prop2range[0] + b[1] * dbiny), dbinx, dbiny,
                         facecolor=str(max(1-bcount/bin_saturated, 0.0)), edgecolor='0.8'))
     pc = PatchCollection(bin_rects, match_original=True)
     ax.add_collection(pc)
 
-    new_bin_rects = [Rectangle((b[0] * dbinx, b[1] * dbiny), dbinx, dbiny) for b in new_bins]
+    new_bin_rects = [Rectangle((b[0] * dbinx + prop1range[0],
+        b[1] * dbiny + prop2range[0]), dbinx, dbiny) for b in new_bins]
     pc2 = PatchCollection(new_bin_rects, facecolor='#82b7b7')
     ax.add_collection(pc2)
 
@@ -51,16 +53,16 @@ def delaunay_figure(box_r, convergence_bins, output_path, triang=None, children=
             ax.annotate(str(int(score)), ((i + 0.5) * dbinx, (j+0.5) * dbiny), zorder=80, ha="center", va="center", size=9)
 
     if not triang and (show_hull or show_triangulation):
-        triang = Delaunay(box_r)
+        triang = Delaunay(props)
 
     # plot all points as triangulation
     if show_triangulation:
-        ax.triplot(box_r[:,0], box_r[:,1], triang.simplices.copy(), color='#78a7cc', lw=1)
+        ax.triplot(props[:,0], props[:,1], triang.simplices.copy(), color='#78a7cc', lw=1)
 
     # plot hull and labels
     if show_hull:
         hull_point_indices = np.unique(triang.convex_hull.flatten())
-        hull_points = np.array([box_r[p] for p in hull_point_indices])
+        hull_points = np.array([props[p] for p in hull_point_indices])
         ax.plot(hull_points[:,0], hull_points[:,1], color='#78a7cc', marker='o', linestyle='None', zorder=10)
 
     # plot children

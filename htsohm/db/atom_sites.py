@@ -7,7 +7,7 @@ class AtomSite(Base):
     __tablename__ = "atom_sites"
 
     id = Column(Integer, primary_key=True)
-    structure_id = Column(Integer, ForeignKey("structures.id"))
+    material_id = Column(Integer, ForeignKey("materials.id"), index=True)
     atom_types_id = Column(Integer, ForeignKey("atom_types.id"))
 
     x = Column(Float)
@@ -27,3 +27,11 @@ class AtomSite(Base):
 
     def __repr__(self):
         return "(%s, %f, %f, %f, %f)" % (str(self.id), self.x, self.y, self.z, self.q)
+
+    @property
+    def xyz(self):
+        return (self.x, self.y, self.z)
+
+    @xyz.setter
+    def xyz(self, xyz):
+        self.x, self.y, self.z = xyz

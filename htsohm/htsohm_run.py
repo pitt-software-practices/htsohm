@@ -14,9 +14,8 @@ from sqlalchemy.orm import joinedload
 from htsohm import generator, load_config_file, db
 from htsohm.bins import calc_bins
 from htsohm.bin.output_csv import output_csv_from_db, csv_add_bin_column
-from htsohm.db import Material, VoidFraction
+from htsohm.db import Material
 from htsohm.simulation.run_all import run_all_simulations
-# from htsohm.figures import delaunay_figure
 import htsohm.select.triangulation as selector_tri
 import htsohm.select.density_bin as selector_bin
 import htsohm.select.best as selector_best
@@ -28,72 +27,77 @@ def print_block(string):
     print('{0}\n{1}\n{0}'.format('=' * 80, string))
 
 
-def empty_lists_2d(x,y):
-    return [[[] for j in range(x)] for i in range(y)]
+def matrix_of_empty_lists(shape):
+    m = np.empty(shape, dtype=object)
+    for i in np.ndindex(m.shape):
+        m[i] = list([])
+    return m
 
-def dump_restart(path, box_d, box_r, bin_counts, bin_materials, bins, gen):
-    np.savez(path, box_d, box_r, bin_counts, bin_materials, bins, gen)
+def load_restart_db(gen, num_bins, bin_ranges, config, session):
+    mats = session.query(Material).filter(Material.generation < gen).all()
+    ids = np.array([m.id for m in mats])
+    props = np.array([property_tuple(m, config["bin_properties"]) for m in mats])
 
-def load_restart(path):
-    if path == "auto":
-        restart_files = glob("*.txt.npz")
-        restart_files.sort(key=os.path.getmtime)
-        if len(restart_files) == 0:
-            raise(Exception("ERROR: no txt.npz restart file in the current directory; auto cannot be used."))
-        path = restart_files[-1]
-        if len(restart_files) > 1:
-            print("WARNING: more than one txt.npz file found in this directory. Using last one: %s" % path)
+    bin_materials = matrix_of_empty_lists([num_bins]*len(config["bin_properties"]))
 
-    npzfile = np.load(path, allow_pickle=True)
-    return [npzfile[v] if npzfile[v].size != 1 else npzfile[v].item() for v in npzfile.files]
+    bins = calc_bins(props, num_bins, bin_ranges)
+    for i, bin_tuple in enumerate(bins):
+        bin_materials[bin_tuple].append(i)
 
-def load_restart_db(gen, num_bins, prop1range, prop2range, session):
-    mats = session.query(Material).options(joinedload("void_fraction"), joinedload("gas_loading")) \
-                    .filter(Material.generation <= gen).all()
-    box_d = np.array([m.id for m in mats])
-    box_r = np.array([(m.void_fraction[0].get_void_fraction(), m.gas_loading[0].absolute_volumetric_loading)
-                     for m in mats])
-
-    bin_counts = np.zeros((num_bins, num_bins))
-    bin_materials = empty_lists_2d(num_bins, num_bins)
-
-    bins = calc_bins(box_r, num_bins, prop1range=prop1range, prop2range=prop2range)
-    for i, (bx, by) in enumerate(bins):
-        bin_counts[bx,by] += 1
-        bin_materials[bx][by].append(i)
-
-    start_gen = gen + 1
-    return box_d, box_r, bin_counts, bin_materials, set(bins), start_gen
+    return ids, props, bin_materials
 
 def check_db_materials_for_restart(expected_num_materials, session, delete_excess=False):
     """Checks for if there are enough or extra materials in the database."""
-    extra_materials = session.query(Material).filter(Material.id > expected_num_materials).all()
-    if len(extra_materials) > 0:
-        print("The database has an extra %d materials in it." % len(extra_materials))
-        if (delete_excess):
-            print("deleting from materials where id > %d" % expected_num_materials)
-            db.delete_extra_materials(expected_num_materials)
-        else:
-            print("Is this the right database and restart file?")
-            sys.exit(1)
-
     num_materials = session.query(Material).count()
+
     if num_materials < expected_num_materials:
         print("The database has fewer materials in it than the restart file indicated.")
         print("Is this the right database and restart file?")
         sys.exit(1)
 
-def init_worker(config):
+    if num_materials > expected_num_materials:
+        print("The database has an extra %d materials in it." % (num_materials - expected_num_materials))
+        if (delete_excess):
+            print("deleting from materials where id > %d" % expected_num_materials)
+            db.delete_extra_materials(expected_num_materials)
+        else:
+            print("Is this the right database and restart file?")
+            raise(Exception("db"))
+
+    max_id = session.query(Material).order_by(Material.id.desc()).limit(1)[0].id
+    if max_id != expected_num_materials:
+        print("The max id of the materials table is not the same as the number of mateirals. Do "
+            "you have missing rows?")
+        sys.exit(1)
+
+    return True
+
+def init_worker(worker_metadata):
     """initialization function for worker that inits the database and gets a worker-specific
     session."""
+    global config
+    global generator
+    global gen
     global worker_session
-    _, worker_session = db.init_database(config["database_connection_string"])
+    generator, config, gen = worker_metadata
+    _, worker_session = db.init_database(config["database_connection_string"], config["properties"])
     return
+
+def property_tuple(material, properties):
+    results = []
+    for propname in properties:
+        p = getattr(material, propname)
+        if "log10" in properties[propname] and properties[propname]["log10"]:
+            # minimum value of property is start of range
+            min_p = 10.0 ** properties[propname]['range'][0]
+            results += [math.log10(max(p, min_p))]
+        else:
+            results += [p]
+    return tuple(results)
 
 def simulate_generation_worker(parent_id):
     """gets most of its parameters from the global worker_metadata set in the
     parallel_simulate_generation method."""
-    generator, config, gen = worker_metadata
     init_slog()
     if parent_id > 0:
         parent = worker_session.query(Material).get(int(parent_id))
@@ -107,81 +111,72 @@ def simulate_generation_worker(parent_id):
     worker_session.commit()
 
     print(get_slog())
-    return (material.id, (material.void_fraction[0].get_void_fraction(),
-                          material.gas_loading[0].absolute_volumetric_loading))
+    return (material.id, property_tuple(material, config["bin_properties"]))
+
 
 def parallel_simulate_generation(generator, num_processes, parent_ids, config, gen, children_per_generation):
-    global worker_metadata
     worker_metadata = (generator, config, gen)
 
     if parent_ids is None:
         parent_ids = [0] * (children_per_generation) # should only be needed for random!
 
-    with Pool(processes=num_processes, initializer=init_worker, initargs=[config]) as pool:
+    with Pool(processes=num_processes, initializer=init_worker, initargs=[worker_metadata]) as pool:
         results = pool.map(simulate_generation_worker, parent_ids)
 
-    box_d, box_r = zip(*results)
-    return (np.array(box_d), np.array(box_r))
+    ids, props = zip(*results)
+    return (np.array(ids), np.array(props))
 
-def select_parents(children_per_generation, box_d, box_r, bin_materials, config):
+def select_parents(children_per_generation, ids, props, bin_materials, config):
     if config['generator_type'] == 'random':
         return (None, [])
     elif config['selector_type'] == 'simplices-or-hull':
-        return selector_tri.choose_parents(children_per_generation, box_d, box_r, config['simplices_or_hull'])
+        return selector_tri.choose_parents(children_per_generation, ids, props, config['simplices_or_hull'])
     elif config['selector_type'] == 'density-bin':
-        return selector_bin.choose_parents(children_per_generation, box_d, box_r, bin_materials)
+        return selector_bin.choose_parents(children_per_generation, ids, props, bin_materials)
     elif config['selector_type'] == 'neighbor-bin':
-        return selector_neighbor_bin.choose_parents(children_per_generation, box_d, box_r, bin_materials)
+        return selector_neighbor_bin.choose_parents(children_per_generation, ids, props, bin_materials)
     elif config['selector_type'] == 'best':
-        return selector_best.choose_parents(children_per_generation, box_d, box_r)
+        return selector_best.choose_parents(children_per_generation, ids, props)
     elif config['selector_type'] == 'specific':
-        return selector_specific.choose_parents(children_per_generation, box_d, box_r, config['selector_specific_id'])
+        return selector_specific.choose_parents(children_per_generation, ids, props, config['selector_specific_id'])
 
 
-def htsohm_run(config_path, restart_generation=-1, override_db_errors=False, num_processes=1, max_generations=None):
+def htsohm_run(config_path, restart_generation=-1, override_db_errors=False, num_processes=1, max_generations=None, return_run_vars=False):
+    """
 
-    def _update_bins_counts_materials(all_bins, bins, start_index):
-        nonlocal bin_counts, bin_materials
-        for i, (bx, by) in enumerate(all_bins):
-            bin_counts[bx,by] += 1
-            bin_materials[bx][by].append(i + start_index)
-        new_bins = set(all_bins) - bins
-        return new_bins, bins.union(new_bins)
+    if return_run_vars, htsohm_run returns the main run vars, which are:
+    - ids: the database ids. Since this is sqlite which is 1-indexed, this should always be one greater than the index.
+    - props: a tuple of properties to bin per material (0 indexed)
+    - bin_materials: an n-dimensional matrix (one dimension per bin dimension); typically accessed
+        bin_materials[bin_tuple], where each entry is a list of material indices in the bin (0 indexed).
+    """
 
+    def _update_bin_materials(all_bins, start_index):
+        nonlocal bin_materials
+        for i, bin_tuple in enumerate(all_bins):
+            bin_materials[bin_tuple].append(i + start_index)
 
     config = load_config_file(config_path)
     os.makedirs(config['output_dir'], exist_ok=True)
     print(config)
 
     children_per_generation = config['children_per_generation']
-    prop1range = config['prop1range']
-    prop2range = config['prop2range']
-    VoidFraction.set_column_for_void_fraction(config['void_fraction_subtype'])
-    num_bins = config['number_of_convergence_bins']
-    benchmarks = config['benchmarks']
-    next_benchmark = benchmarks.pop(0)
-    last_benchmark_reached = False
-    load_restart_path = config['load_restart_path']
 
+    bin_ranges = [config['bin_properties'][p]["range"] for p in config['bin_properties']]
+    num_bins = config["num_bins"]
     if max_generations is None:
         max_generations = config['max_generations']
 
-    engine, session = db.init_database(config["database_connection_string"],
-                backup=(load_restart_path != False or restart_generation > 0))
+    engine, session = db.init_database(config["database_connection_string"], config['properties'],
+                backup=(restart_generation > 1))
 
     print('{:%Y-%m-%d %H:%M:%S}'.format(datetime.now()))
-    if restart_generation >= 0:
-        print("Restarting from database using generation: %s" % restart_generation)
-        box_d, box_r, bin_counts, bin_materials, bins, start_gen = load_restart_db(
-            restart_generation, num_bins, prop1range, prop2range, session)
-
-        print("Restarting at generation %d\nThere are currently %d materials" % (start_gen, len(box_r)))
-        check_db_materials_for_restart(len(box_r), session, delete_excess=override_db_errors)
-    elif load_restart_path:
-        print("Restarting from file: %s" % load_restart_path)
-        box_d, box_r, bin_counts, bin_materials, bins, start_gen = load_restart(load_restart_path)
-        print("Restarting at generation %d\nThere are currently %d materials" % (start_gen, len(box_r)))
-        check_db_materials_for_restart(len(box_r), session, delete_excess=override_db_errors)
+    if restart_generation > 1:
+        print("Restarting from database at generation: %s" % restart_generation)
+        check_db_materials_for_restart((restart_generation - 1)*children_per_generation, session, delete_excess=override_db_errors)
+        ids, props, bin_materials = load_restart_db(restart_generation, num_bins, bin_ranges, config, session)
+        print("We loaded %d materials from the database" % len(props))
+        start_gen = restart_generation
     else:
         if session.query(Material).count() > 0:
             print("ERROR: cannot have existing materials in the database for a new run")
@@ -190,92 +185,49 @@ def htsohm_run(config_path, restart_generation=-1, override_db_errors=False, num
         # generate initial generation of random materials
         print("applying random seed to initial points: %d" % config['initial_points_random_seed'])
         random.seed(config['initial_points_random_seed'])
-        box_d, box_r = parallel_simulate_generation(generator.random.new_material, num_processes, None,
-                        config, gen=0, children_per_generation=config['children_per_generation'])
+        ids, props = parallel_simulate_generation(generator.random.new_material, num_processes, None,
+                        config, gen=1, children_per_generation=config['children_per_generation'])
         random.seed() # flush the seed so that only the initial points are set, not generated points
 
         # setup initial bins
-        bin_counts = np.zeros((num_bins, num_bins))
-        bin_materials = empty_lists_2d(num_bins, num_bins)
-        all_bins = calc_bins(box_r, num_bins, prop1range=prop1range, prop2range=prop2range)
-        new_bins, bins = _update_bins_counts_materials(all_bins, set(), 0)
+        bin_materials =  matrix_of_empty_lists([num_bins]*len(config["bin_properties"]))
+        all_bins = calc_bins(props, num_bins, bin_ranges)
+        _update_bin_materials(all_bins, 0)
 
-        output_path = os.path.join(config['output_dir'], "binplot_0.png")
-        # delaunay_figure(box_r, num_bins, output_path, bins=bin_counts, \
-        #                     title="Starting random materials", show_triangulation=False, show_hull=False, \
-        #                     prop1range=prop1range, prop2range=prop2range)
-
-        start_gen = 1
+        print([print(i, b, all_bins[i]) for i, b in enumerate(props)])
+        start_gen = 2
 
     if config['generator_type'] == 'random':
         generator_method = generator.random.new_material
     elif config['generator_type'] == 'mutate':
         generator_method = generator.mutate.mutate_material
 
+    # first generation is randomly determined above, so start_gen should always be >= 2.
     for gen in range(start_gen, max_generations + 1):
-        benchmark_just_reached = False
-
         # mutate materials and simulate properties
-        parents_d, parents_r = select_parents(children_per_generation, box_d, box_r, bin_materials, config)
-        new_box_d, new_box_r = parallel_simulate_generation(generator_method, num_processes, parents_d,
+        parents_ids, parents_props = select_parents(children_per_generation, ids, props, bin_materials, config)
+        new_ids, new_props = parallel_simulate_generation(generator_method, num_processes, parents_ids,
                                 config, gen=gen, children_per_generation=config['children_per_generation'])
 
         # track bins
-        all_bins = calc_bins(new_box_r, num_bins, prop1range=prop1range, prop2range=prop2range)
-        new_bins, bins = _update_bins_counts_materials(all_bins, bins, gen * children_per_generation)
+        all_bins = calc_bins(new_props, num_bins, bin_ranges)
+        _update_bin_materials(all_bins, (gen - 1) * children_per_generation)
 
         # evaluate algorithm effectiveness
-        bin_fraction_explored = len(bins) / num_bins ** 2
+        explored_bins = [i for i,v in np.ndenumerate(bin_materials) if len(v) > 0]
+        bin_fraction_explored = len(explored_bins) / num_bins ** 2
         print_block('GENERATION %s: %5.2f%%' % (gen, bin_fraction_explored * 100))
-        while bin_fraction_explored >= next_benchmark:
-            benchmark_just_reached = True
-            print_block("%s: %5.2f%% exploration accomplished at generation %d" %
-                ('{:%Y-%m-%d %H:%M:%S}'.format(datetime.now()), bin_fraction_explored * 100, gen))
-            if benchmarks:
-                next_benchmark = benchmarks.pop(0)
-            else:
-                last_benchmark_reached = True
 
-        # if config['bin_graph_on'] and (
-        #     (benchmark_just_reached or gen == config['max_generations']) or \
-        #     (config['bin_graph_every'] > 0  and gen % config['bin_graph_every'] == 0)):
-        #
-        #     output_path = os.path.join(config['output_dir'], "binplot_%d.png" % gen)
-        #     delaunay_figure(box_r, num_bins, output_path, children=new_box_r, parents=parents_r,
-        #                     bins=bin_counts, new_bins=new_bins,
-        #                     title="Generation %d: %d/%d (+%d) %5.2f%% (+%5.2f %%)" %
-        #                         (gen, len(bins), num_bins ** 2, len(new_bins),
-        #                         100*float(len(bins)) / num_bins ** 2, 100*float(len(new_bins)) / num_bins ** 2 ),
-        #                     patches=None, prop1range=prop1range, prop2range=prop2range, \
-        #                     perturbation_methods=["all"]*children_per_generation, show_triangulation=False, show_hull=False)
-        #
-        # if config['tri_graph_on'] and (
-        #     (benchmark_just_reached or gen == config['max_generations']) or \
-        #     (config['tri_graph_every'] > 0  and gen % config['tri_graph_every'] == 0)):
-        #
-        #     output_path = os.path.join(config['output_dir'], "triplot_%d.png" % gen)
-        #     delaunay_figure(box_r, num_bins, output_path, children=new_box_r, parents=parents_r,
-        #                     bins=bin_counts, new_bins=new_bins,
-        #                     title="Generation %d: %d/%d (+%d) %5.2f%% (+%5.2f %%)" %
-        #                         (gen, len(bins), num_bins ** 2, len(new_bins),
-        #                         100*float(len(bins)) / num_bins ** 2, 100*float(len(new_bins)) / num_bins ** 2 ),
-        #                     patches=None, prop1range=prop1range, prop2range=prop2range, \
-        #                     perturbation_methods=["all"]*children_per_generation)
+        ids = np.append(ids, new_ids, axis=0)
+        props = np.append(props, new_props, axis=0)
 
-        box_d = np.append(box_d, new_box_d, axis=0)
-        box_r = np.append(box_r, new_box_r, axis=0)
+    if return_run_vars:
+        return ids, props, bin_materials
+    return None
 
-        restart_path = os.path.join(config['output_dir'], "restart.txt.npz")
-        dump_restart(restart_path, box_d, box_r, bin_counts, bin_materials, bins, gen + 1)
-        if benchmark_just_reached or gen == max_generations:
-            shutil.move(restart_path, os.path.join(config['output_dir'], "restart%d.txt.npz" % gen))
-
-        if last_benchmark_reached:
-            break
-
-    with open("pm.csv", 'w', newline='') as f:
-        output_csv_from_db(session, output_file=f)
-
-    with open("pm-binned.csv", 'w', newline='') as f:
-        # column 8 is void_fraction_geo, 9 is methane loading
-        csv_add_bin_column("pm.csv", [(8, *prop1range, num_bins), (9, *prop2range, num_bins)], output_file=f)
+    # with open("pm.csv", 'w', newline='') as f:
+    #     output_csv_from_db(session, output_file=f)
+    #
+    # with open("pm-binned.csv", 'w', newline='') as f:
+    #     # column 12 is void_fraction_geo, 13 is methane loading
+    #     csv_add_bin_column("pm.csv", [(12, *prop1range, num_bins), (13, *prop2range, num_bins)], output_file=f)
